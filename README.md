@@ -1,5 +1,5 @@
 # mapple — kernel x86_64 estilo Unix (C + C++ + Assembly, zero dependências)
-
+## esse projeto e feito com IA opencode o nome mapple foi escolhido aleatoriamente mas o sistema se inspira no mac os e no win98 
 Núcleo educacional/hobby em C, C++ e Assembly GAS, modo longo
 (long mode), multiboot via GRUB, shell próprio, drivers próprios e
 interface gráfica com gerenciador de janelas. Sem libc externa, sem
