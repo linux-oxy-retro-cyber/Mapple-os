@@ -1,0 +1,5 @@
+/usr/bin abriga os applets utilitarios do built:
+ver uptime mem color head wc grep which man env
+history date calc hexdump cc ps theme.
+(Eles moram dentro do /bin/busybox; aqui ficam
+os arquivos de dados. Veja `which cc`.)

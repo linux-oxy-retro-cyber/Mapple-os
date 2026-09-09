@@ -1,0 +1,311 @@
+contexto.txt — mapple 0.12.0: o que cada coisa faz + arquitetura
+================================================================
+
+10. USB + AUDIO + BRILHO (2026-09-08, detalhe em DOC_USB_AUDIO_BRILHO.md)
+--------------------------------------------------------------------------
+usb.c       Host por polling (sem IRQ/DMA): UHCI (IO BAR4, PORTSC
+            +0x10/+0x12), EHCI (MMIO BAR0, CAPLENGTH/HCSPARAMS, PORTSC
+            = op+0x44+n*4, conectado=high), XHCI (CAPLENGTH 0x40 no
+            QEMU, MaxPorts = bits 31:24 do HCSPARAMS1!, PORTSC =
+            op+0x400+n*0x10, spd bits 10-13). OHCI so presenca.
+            MSC = stub: `usbmount` cria /mnt/usb se houver dispositivo.
+            REGRA: MMIO so com acesso 32 bits (byte retorna 0)!
+            Drivers novos: usb-core, usb-msc. Shell: `usb`, `usbmount`.
+audio.c     Mixer: vol 0-100 (padrao 80) + mute; pulsing de 20ms no
+            pcspk (vol<100 toca on=20*vol/100 por fatia). AC97
+            (8086:2415...) + HDA (classe 0403) so detectados (DMA =
+            roadmap). `beep`/`play` passam por audio_beep/audio_play.
+            Driver novo: mixer. Shell: `vol`, `mute`, `audioinfo`.
+brightness.c Nivel 10-100 (padrao 100); bright_apply() escala XRGB no
+            present back->front (gui.c: fb_present_rect; nivel 100
+            mantem o fast-path u64). Texto VGA: so registrado.
+            Driver novo: backlight. Shell: `brilho` (alias brightness).
+            Testado: screendump 55.0 -> 32.8 com `brilho 60`.
+
+0. VISAO GERAL
+--------------
+mapple e um kernel hobby estilo Unix para x86_64, em C, C++ e Assembly
+GAS, sem dependencias externas (sem libc, sem userspace Linux, sem
+binarios de terceiros). Tudo executa em anel 0 (CPL 0): nao ha
+processos, syscalls, ring 3 ou memoria virtual por tarefa. O "sistema"
+e um unico programa de kernel com shell embutido + apps graficos.
+
+C++ NO KERNEL (regras rigidas, ver Makefile CXXFLAGS):
+- sem excecoes (-fno-exceptions), sem RTTI, sem heap (sem new/delete);
+- sem construtores globais: .init_array NAO roda (sem CRT). Objetos
+  estaticos devem ser POD/zero-init + init() explicito;
+- sem virtual (evita __cxa_pure_virtual) e sem destrutores estaticos
+  (evita __cxa_atexit); fronteira com C/Assembly via extern "C";
+- exemplo minimo: cxxsmoke.cpp (classe + log serial no boot).
+
+1. O QUE CADA ARQUIVO FAZ
+--------------------------
+boot.s      Ponto de entrada _start (32 bits, via GRUB/Multiboot1):
+            salva magic/mbi, zera a BSS, monta page tables 2MB cobrindo
+            4GB (RAM + MMIO do framebuffer), ativa PAE/LME/PG, carrega a
+            GDT64, salta p/ long mode e chama kmain(magic, mbi).
+            Contem stubs de IRQ (default/pit/keyboard/mouse), _load_idt
+            e set_idt_entry (gates 64-bit de 16 bytes).
+linker.ld   ELF64, ENTRY(_start), kernel fisico em 0x100000. Define
+            __bss_start/_end (o boot zera a BSS manualmente: o GRUB nao
+            garante BSS zerada p/ ELF).
+kernel.c    kmain: serial COM1, IDT (timer 0x20, teclado 0x21, mouse
+            0x2C), mmap de RAM (MBI), drivers, ramfs, shell ou GUI.
+            Console unificado (VGA-texto ou terminal grafico + serial)
+            com parser ANSI SGR (cores 32-bit, inclusive truecolor).
+vga.c       Driver texto VGA 80x25 (0xB8000): caracteres, cores 16,
+            cursor por hardware, scroll, write_at/move p/ o editor.
+keyboard.c  PS/2 scancode set 1, layout US, Shift/Caps/Ctrl/Alt, setas,
+            Del/Home/End, Enter numerico. Remapeia o PIC (0x20/0x28),
+            EOI, desmascara IRQs (inclui cascata IRQ2 p/ o escravo!).
+            Roteia teclas por foco (shell x apps) e gera KEY_SWITCH
+            no Alt+Tab. Leitura com hlt (economia de CPU).
+pit.c       PIT canal 0 a 100 Hz (IRQ0): ticks, uptime, base de timeouts
+            (mouse ACK, vsync) e do pacing de frames.
+mouse.c     PS/2 porta auxiliar (IRQ12): init (A8/config/F6/F4 com ACK
+            e drain), pacotes de 3 bytes, clamp na resolucao real.
+            Filtra respostas de protocolo (0xFA/0xFE/0xAA) p/ nao
+            teleportar o cursor; ignora prefixo E0 desconhecido.
+fs.c        Duas camadas: ROM = ramfs embutido (rootfs/ empacotado pelo
+            Makefile em ramfs_data.c); RW = overlay em RAM (32 arqs de
+            2KB + 32 dirs). resolve() normaliza (. .. //), write
+            sombreia a ROM, rm de ROM e recusado. ls hierarquico.
+pcspk.c     PC Speaker: PIT canal 2 + porta 0x61 (beep/play). Sem
+            DMA (HDA/AC97 ficam p/ depois); som audivel exige backend
+            de audio no QEMU.
+bmp.c       BMP 24-bit sem compressao (top-down e bottom-up): parser
+            + blit com escala. Usado pelo visualizador e wallpapers.
+e1000.c     Intel 82540EM: MMIO via BAR0, aneis TX(8)/RX(32) com
+            polling (DD bits), link check, MAC de RAL/RAH. Sem IRQ.
+net.c       ARP (tabela 8, request/reply, aprende ouvindo) + IPv4
+            (checksum, TTL 64) + ICMP echo (envia, responde, mede
+            RTT em ticks). IP estatico 10.0.2.15 (QEMU user-net).
+shell.c     built: shell multi-call estilo busybox, 52 applets, PATH
+            /bin:/usr/bin, cwd, redirect > e >> (captura de saida),
+            historico, readline moderno (setas, Home/End, Del, Tab-
+            complete de applets+arquivos, Ctrl+C/L/A/E, Alt+Tab visual
+            com overlay + timeout, prompt colorido ANSI, loop modal
+            p/ apps (Notepad, Navegador).
+libc.c      Biblioteca propria: strlen/strcmp/memcpy/memset/memmove/
+            memcmp/strcpy/atoi/utoa... O GCC gera chamadas a memcpy/
+            memset implicitamente: elas MORAM aqui (freestanding).
+edit.c      Editor tela-cheia estilo nano (via ts_*): setas, scroll
+            horizontal/vertical, ^O salva, ^X salva+sai, Esc cancela.
+cc.c        Compilador do subconjunto C: int, atribuicao, +-*/% (),
+            - unario, print(), return, comentarios //. Lexer + recursive
+            descent com ancora de erro. `calc` reusa o avaliador.
+font.c      Fonte bitmap 8x8 desenhada a mao (ASCII 32-126, 94 glifos).
+            Usada por TODO texto grafico + pelo OCR dos testes.
+gui.c       Compositor + WM + apps (~1800 linhas). Ver secao 4.
+pci.c       Scan PCI bus 0 (0xCF8/0xCFC): vendor/device/classe/BARs;
+            pci_enable() liga I/O+mem+bus-master (obrigatorio p/ SVGA).
+ata.c       IDENTIFY ATA/ATAPI (PIO) nos 4 slots IDE; modelo (byte-swap)
+            e tamanho LBA48/28. QEMU expoe o CD de boot como ATAPI.
+svga.c      VMware SVGA II: handshake de ID, VRAM/caps, FIFO 64KB com
+            timeouts, SYNC, cursor HW. RECT_FILL e cursor HW ficam OFF
+            apos divergencia empirica (fallback CPU automatico).
+pit.c       (ver acima).
+mouse.c     (ver acima).
+vga.c       (ver acima).
+rootfs/     bin/built, bin/busybox (manifestos), etc/motd+hostname,
+            home/guest/{demo.c,notas.txt,...}, root/notas.txt,
+            usr/bin/README. Editaveis; entram no ramfs a cada build.
+Makefile    build/ (objetos+ISO), RES=WxH (framebuffer via --defsym),
+            deteccao de grub2/grub, -accel kvm automatico, alvos:
+            all/iso/run/run-serial/clean.
+
+2. FLUXO DE BOOT
+----------------
+firmware (SeaBIOS) -> GRUB2 (le Multiboot1, liga VBE 1024x768x32)
+  -> _start: push eax/ebx; zera BSS; page tables 4xPD (4GB, 2MB);
+     CR4.PAE, EFER.LME, CR0.PG; lgdt; ljmp p/ codigo 64
+  -> long_mode_entry: segmentos, stack 16KB, kmain(magic, mbi)
+  -> kmain: serial, IDT(256), PIC remap, teclado, PIT, framebuffer
+     (ou texto), ATA, PCI, [SVGA], mouse, fs, sti, shell_run.
+Sem framebuffer valido: cai p/ modo texto VGA (mesmo shell).
+
+3. MEMORIA (fisica, identity-map 0-4GB)
+---------------------------------------
+0x000000  memoria baixa (IVT/BDA/GRUB/MBI)
+0x0A0000  VRAM texto/VGA
+0x100000  kernel ELF (text/rodata/data/bss; heap futuro: apos _end)
+...       RAM livre (mmap do MBI; soma em sys_mem_kb)
+0xB8000   (alias) texto VGA
+0xFD000000 framebuffer VBE (QEMU; varia: ler MBI+88, nunca chumbar)
+0xFExxxxxx BARs PCI (ex: SVGA em 0xF0000000+)
+Stack 16KB no .bss; sem guard page (roadmap: TSS/IST + guardas).
+
+4. GRAFICOS (gui.c) E O WM
+---------------------------
+Pipeline 32-bit XRGB8888 (R=16,G=8,B=0; campos do MBI sao
+inconfiaveis neste QEMU/GRUB: hardcoded apos validacao por dump):
+  primitivas px/fill/glyph/text -> draw (RAM back OU VRAM direta)
+  -> present (copia back->front no retraco 0x3DA, ou SYNC)
+Anti-tearing: double buffer 12MB + vsync com timeout (nunca trava).
+Eficiencia: dirty-rects + clip em todas as primitivas + present
+parcial; gradiente com cache por linha; pacing max ~50fps; contador
+de FPS real (applet `fps`, Tarefas).
+WM: janelas com foco, z-order, arrasto, minimizar ([_]), maximizar
+(verde, salva geometria), fechar ([X]), semaforo colorido, sombra,
+cantos arredondados, dock translucido c/ dots, menubar c/ relogio+data,
+menu suspenso c/ icones (9 itens), icones no desktop (duplo-clique),
+Alt+Tab VISUAL (overlay central, Tab avanca, Enter confirma, Esc ou
+timeout confirma/cancela; hotkeys globais via fila de apps quando o
+shell dorme).
+Apps: isn_terminal (shell), Notepad (buffer+cursor+scroll), Explorador
+(navega, abre .txt no Notepad), Tarefas (uptime/ticks/fps/RAM/overlay),
+Discos (ATA+PCI+GPU+VRAM+ramfs+rede), 3ddd (cubo 3D em ponto fixo Q10:
+Taylor p/ seno, painter, flat shading), Navegador offline em C++
+(HTML: h1-h3 p ul li center img title + texto puro; CSS subset com
+regras h1/p/a, inline style= e cores nomeadas/#RRGGBB (inline vence);
+scripts subset com var/print/alert/if/while; links clicaveis c/ hover;
+voltar/avancar sem duplicatas; barra de URL com Ctrl+L; scroll),
+Configuracoes (papel: 4 temas + BMPs; resolucao SVGA ao vivo
+1024/800/640; texto do terminal 8/16/32px) e Imagem (viewer BMP).
+REGRA C++: navigate() copia a URL p/ buffer local ANTES de load()/
+parse() (dangling pointer: links_[].href e reescrito pelo parse!).
+Teclado por foco: terminal focado -> kbd_buf (shell); senao -> fila
+de apps (Notepad). Loop modal no shell p/ apps abertos pelo menu.
+
+5. INPUT (teclado + mouse)
+---------------------------
+Teclado IRQ1 -> handler traduz scancode->ASCII (modificadores) ->
+kbd_route() pelo foco -> kbd_buf (shell, bloqueante com hlt+poll)
+ou appq (apps). Linha especial 0xE0: setas/Del/Home/End/numerico.
+Mouse IRQ12 -> pacotes de 3 bytes (sync bit3 + filtro FA/FE/AA) ->
+posicao (clamp na resolucao) + botoes; compositor consome click/
+arrasto/hover/duplo-clique (50 ticks).
+
+6. SISTEMA DE ARQUIVOS E SHELL
+-------------------------------
+ramfs (build-time, somente leitura) + overlay (tempo de execucao).
+Shell built: parse em 2 fases (redirect > e >> com captura, depois
+comando/args), resolve por PATH com basename (aceita /bin/ls),
+applets em C direto (sem fork/exec: nao ha userspace).
+`cc arquivo.c`: le do FS, interpreta, mostra [exit N].
+
+7. TESTES (todos headless e deterministicos)
+--------------------------------------------
+QEMU -display none + serial em arquivo + monitor HMP(stdio) p/
+sendkey/mouse_move/mouse_button/screendump. Analise em Python:
+cores por regiao, OCR com a propria font.c, logs de serie.
+Cobrem: boot, shell (37+ applets), FS gravavel, editor (save+cat),
+teclado completo, mouse (menu/abrir/fechar/arrastar/foco),
+ cubo (rotacao por diff), resolucoes, fallback texto, std+vmware.
+Armadilhas conhecidas do harness: HMP nao aceita MAIUSCULAS no
+sendkey; mouse_button sozinho nao gera pacote (combinar com move);
+moves >~150 de uma vez sao imprecisos (fatiar).
+
+8. POR QUE NAO (BusyBox / ZFS / resto da internet / resto do HTML)
+----------------------------------------------------------------------
+BusyBox e ELF userspace Linux: exigiria syscalls (200+), fork/exec,
+loader ELF, processos com VM isolada, VFS e libc. Equivale a escrever
+um Unix completo; o built embutido e o equivalente honesto hoje.
+ZFS (OpenZFS) tem milhoes de linhas e exige threads de kernel, ARC,
+checksums on-disk e, antes de tudo, um driver de disco com escrita
+(hoje so ha IDENTIFY). Teto realista: ATA R/W + FAT/ext2 RO.
+Internet de verdade (TCP/DHCP/DNS/HTTP): exigiria pilha completa;
+hoje ha ARP/IPv4/ICMP com IP estatico (ping funciona no QEMU).
+Audio alem do speaker (HDA/AC97) exige DMA + codecs: roadmap.
+Video-decodificacao (H.264 etc.) e JS completo (closures, DOM,
+eventos, GC): projetos proprios de meses; o subset atual
+(var/print/alert/if/while + CSS de cores) e a fundacao.
+"NetBSD" (processos, VM por tarefa, rede completa, FS completo) e
+roadmap de meses. Proximos passos: pmm/vmm+heap, syscalls+anel 3,
+loader ELF, ATA R/W, TCP.
+
+9. BUGS CLASSICOS JA CACADOS (nao reintroduzir!)
+--------------------------------------------------
+- dirty parcial + flag bare = tela fantasma: TODO gui_dirty bare
+  virou gui_mark_dirty() (full); parciais usam gui_invalidate().
+  "Speckles" apos fechar janela eram 99% gradiente mal classificado
+  pelo analisador + 1% hazard real (corrigido acima).
+- Navegador sem historico: navigate() recebia ponteiro p/ links_[] e
+  load()/parse() reescrevia o array -> copiar URL p/ buffer local
+  ANTES de tudo (dangling pointer classico).
+- C++ sem CRT: nada de construtores globais/new/exceptions/virtual
+  puro; checar .init_array vazio (nm) se algo estranho acontecer.
+- GRUB nao zera BSS p/ ELF -> zerar em _start (antes: bytes fantasma).
+- xorb %al clobberava o magic do GRUB -> push antes de zerar.
+- Framebuffer em 0xFD... fora do 1GB mapeado -> page tables de 4GB.
+- Offsets do MBI: framebuffer em +88 (72-87 sao VBE!).
+- Posicoes RGB do MBI erradas -> XRGB fixo validado por dump.
+- Cascata do PIC (IRQ2) mascarada bloqueava o mouse (IRQ12).
+- ACK 0xFA tardio teleportava o cursor -> drain + filtro FA/FE/AA.
+- HMP mouse_button sozinho nao gera pacote -> combinar com move.
+- Shell dormia no getchar e apps do menu nunca rodavam -> loop modal
+  + pump no getraw + hotkeys globais no poll.
+- console_putc marcava full-draw por caractere -> invalidez parcial.
+- SVGA: COMMAND PCI desligado; portas em +0/+1 (nao +4!); ID e
+  0x90000002 (nao 0x900002); FIFO assincrona cobre desenhos CPU
+  (SYNC apos cada fill) — RECT_FILL/cursor HW OFF por divergencia.
+- TCG sem KVM =~ 1-5fps; `-accel kvm` =~ 30fps (Makefile automatico).
+- ICMP: id/seq vao em [38-41], checksum em [36-37] (nao o contrario!).
+- Parser HTML: extracao com variavel separada (q) precisa avancar
+  a principal (k=q) senao loop infinito (foi o <img>).
+- CSS: seletor com digito ("h1") e cores por linha (emit_word pinta
+  junto, nao so new_line); inline vence regra de tag.
+- Hit-test de linhas clicaveis: contar a partir do fim do titulo
+  (off-by-one trocou papel por resolucao).
+- HMP: sem MAIUSCULAS no sendkey; mouse_button sozinho nao gera
+  pacote (combinar com move); moves grandes fatiar em ~150.
+- OCR proprio: alinhar x/y exatos; threshold so no canal R e cego p/
+  verde/azul; janelas sobrepostas confundem a regiao.
+- 6 novos apps (gui.c + shell.c): Calc (=22 usa cc_eval_expr), Sobre,
+  Calendario (navegavel), Relogio (RTC ao vivo), Snake (sn_reset no open;
+  sem isso len=0 e a cobra nasce invisivel), Musica (sequencias no pcspk).
+- Foco/teclado: Alt+T (gui_focus_term) tira o shell do beco sem saida
+  quando app modeless rouba o foco; durante switcher, kbd_route manda
+  tudo p/ appq (nao divide digitacao); gui_app_getkey_alive() aborta o
+  getkey bloqueante se o modal fechar/perder foco (valia p/ notepad/web
+  tb). QEMU headless (-display none) ignora mouse_move: refoco nos
+  testes via Alt+T, nao mouse.
+- hwdetect.c (novo): 31 deteccoes reais -> `drivers` 37/49. CPUID
+  (vendor/brand/fam/flags p/ `cpuinfo`), CR0 (fpu), MSR 1B (apic),
+  RSDP/EBDA+ROM (acpi 1.0/2.0), HPET via XSDT/RSDT, folha 40000000h
+  (hypervisor), backdoor VMware 5658h, fw_cfg QEMU (outw 510h + 4x inb
+  511h; inl direto mistura portas!), _SM_ (smbios), COM1 loopback,
+  LPT/floppy/CMOS via 70h/71h, ATAPI via 0xEC+assinatura EB14 (ler
+  assinatura DEPOIS do 0xA1 falha), PCI por classe em pci.c
+  (pci_find_class + pci_find_class_pi; USB usa prog-if, nao subclasse),
+  dma/a20 reportados. `mem` mostra CMOS estendida; `reboot` via kbc
+  0xFE (+triple fault), testado: VM reiniciou.
+- QEMU -display none: sem USB no PCI (ausencia honesta), sem audio/nic2.
+- Identidade MG: logo ASCII (#) no boot (console+vga/term; serial sem
+  ANSI), selo verde MG 2x no Sobre, `fetch` estilo fastfetch (logo +
+  OS/Kernel/Uptime/Shell/Res/CPU/Mem-e820/Drivers/Font; drv_ok_count
+  novo; sys_mem_kb do mmap e820 com fallback CMOS).
+- `matrix` estilo cmatrix: app W_MTRX (menu 16, q/Esc sai, 78x44 gotas
+  com rastro branco->verde) + backend VGA texto (0xB8000 direto,
+  keyboard_has_key/try_get novos; sai com q e limpa a tela).
+  Testado em -vga none (modo texto real).
+- Fonte 8x8 refeita: raster Adwaita Mono (OFL) size 12 com squeeze
+  vertical 14->8 + threshold; drop-in em font.c. VGA texto usa fonte
+  do hardware (inalterada).
+- Fonte trocada (ilegivel -> legivel): Adwaita rasterizado saiu fino
+  demais em 8x8; agora font8x8_basic (dominio publico, Dan Hepper/IBM
+  VGA) com bits invertidos p/ bit7=esquerda. `fetch` diz mapple-8
+  (IBM VGA). VGA texto usa fonte do hardware (inalterada).
+- help refeito: categorias coloridas, todos os 64 comandos, teclas
+  (Alt+Tab/Alt+T/Esc), exemplos; man novo p/ fetch/matrix/cpuinfo/
+  drivers/reboot/calc/snake/notepad/help.
+
+11. JOGOS + RM -RF (2026-09-08, detalhe em DOC_JOGOS.md)
+---------------------------------------------------------
+gui.c       +7 tipos (W_FOON/W_PONG/W_BRK/W_TET/W_TORUS/W_TERR/W_TUN).
+            foon: raycaster Doom-like Q10 (DDA/coluna, perp sem fisheye,
+            4 demonios billboard, hitscan, HUD+minimapa). pong/breakout/
+            tetris: loops modais padrao Snake. torus (96 quads painter),
+            terreno (14x14 wireframe), tunel (12 aneis perspectiva):
+            auto-animados via invalidate em gui_poll (padrao 3ddd).
+            Infra: gui_game_modal()+game_run_loop() (1 pump em shell.c
+            e keyboard.c). Menu virou 2 colunas x 12 (menu_rows/pos).
+            REGRA: todo draw com fsin/fcos chama sin_build()! Projecao
+            segue o cubo (x*D/den, depois *half/1024). Apps nao-modais
+            roubam o foco (Alt+T volta, igual ao 3ddd).
+            Screenshots com TCG parecem congelados: testar animacao com
+            -accel kvm + diff de pixels (screendump perturba o timing).
+fs.c        fs_rm_recursive(): overlay em path e abaixo (ROM = -2).
+shell.c     rm [-r] [-f] <...> (multiplos); 78 applets: foon pong
+            breakout tetris torus terreno tunel (+man). Drivers novos:
+            foon, arcade, gpu3d.

@@ -1,0 +1,2 @@
+Ola! Este arquivo mora dentro do kernel, no ramfs.
+Ele foi empacotado pelo Makefile na hora do build.

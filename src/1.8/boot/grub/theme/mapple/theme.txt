@@ -1,0 +1,27 @@
+# Tema GRUB do mapple: menu grafico com logo.
+title-text: "mapple"
+desktop-image: "bg.png"
+desktop-color: "#0b0b16"
+terminal-font: "Liberation Sans Regular 16"
+
++ boot_menu {
+    left = 15%
+    top = 52%
+    width = 70%
+    height = 30%
+    item_font = "Liberation Sans Regular 16"
+    item_color = "#d8d8e8"
+    selected_item_color = "#ffffff"
+    item_height = 30
+    item_spacing = 8
+}
+
++ label {
+    top = 86%
+    left = 15%
+    width = 70%
+    align = "center"
+    text = "setas escolhem, Enter inicia (automatico em 3s)"
+    font = "Liberation Sans Regular 16"
+    color = "#808090"
+}

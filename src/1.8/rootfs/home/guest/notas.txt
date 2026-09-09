@@ -1,0 +1,2 @@
+Arquivo de exemplo do Notepad.
+Edite pelo menu Iniciar > Notepad ou: notepad /home/guest/notas.txt
