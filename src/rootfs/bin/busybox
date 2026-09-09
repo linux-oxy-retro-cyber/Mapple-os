@@ -1,6 +1,0 @@
-BusyBox v0.8.0 (mapple) multi-call binary.
-Os applets moram aqui dentro: help, ls, cat, echo,
-uname, sleep, uptime, mem, color, whoami, clear,
-reboot, halt, pwd.
-Uso: busybox <applet> [args]  (ex: busybox uname)
-/bin/sh -> este binario. Shell padrao do sistema.
