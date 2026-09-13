@@ -1,2 +1,0 @@
-Documentacao minima do mapple (em /usr/share).
-Proximos passos: pmm/vmm, syscalls, ring 3.
